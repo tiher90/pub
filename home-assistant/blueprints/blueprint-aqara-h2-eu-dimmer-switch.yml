@@ -1,5 +1,5 @@
 blueprint:
-  name: Aqara H2 Dimmer Switch (KD-R01D) - Kinetic Control Suite
+  name: Aqara H2 Dimmer Switch (KD-R01D) - Kinetic Control Suite (Fixed)
   description: |
     An advanced, MQTT-native blueprint for the Aqara H2 EU Dimmer (KD-R01D) via Zigbee2MQTT.
     Features kinetic acceleration curves to match physical turning speed naturally.
@@ -121,6 +121,9 @@ variables:
   p_mode: !input pressed_behavior
   t_smooth: !input transition_smoothing
   curve: !input acceleration_factor
+  ct_default: !input colortemp_default
+  nl_brightness: !input nightlight_brightness
+  nl_kelvin: !input nightlight_kelvin
 
 trigger:
   - platform: mqtt
@@ -143,27 +146,27 @@ action:
             target:
               entity_id: "{{ target_light_entity }}"
 
-      # 2. Double Click -> Reset to Default White State
+      # 2. Double Click -> Reset to Default White State (Fixed Parameter)
       - conditions:
           - condition: template
             value_template: "{{ trigger.payload_json.action == 'double' }}"
         sequence:
           - service: light.turn_on
             data:
-              kelvin: !input colortemp_default
+              color_temp_kelvin: "{{ ct_default }}"
               transition: "{{ t_smooth }}"
             target:
               entity_id: "{{ target_light_entity }}"
 
-      # 3. Long Press (Hold) -> Comfort Nightlight Preset
+      # 3. Long Press (Hold) -> Comfort Nightlight Preset (Fixed Parameter)
       - conditions:
           - condition: template
             value_template: "{{ trigger.payload_json.action == 'hold' }}"
         sequence:
           - service: light.turn_on
             data:
-              brightness_pct: !input nightlight_brightness
-              kelvin: !input nightlight_kelvin
+              brightness_pct: "{{ nl_brightness }}"
+              color_temp_kelvin: "{{ nl_kelvin }}"
               transition: 0.4
             target:
               entity_id: "{{ target_light_entity }}"
@@ -174,7 +177,7 @@ action:
             value_template: "{{ trigger.payload_json.action == 'rotation' }}"
         sequence:
           - choose:
-              # Case A: Dial rotated normally -> Smooth Brightness Control (With Kinetic Curve)
+              # Case A: Dial rotated normally -> Smooth Brightness Control
               - conditions:
                   - condition: template
                     value_template: "{{ trigger.payload_json.action_rotation_button_state == 'released' }}"
@@ -197,7 +200,7 @@ action:
                     value_template: "{{ trigger.payload_json.action_rotation_button_state == 'pressed' }}"
                 sequence:
                   - choose:
-                      # Branch B1: Adjusting CCT Kelvin Values
+                      # Branch B1: Adjusting CCT Kelvin Values (Fixed Parameter)
                       - conditions:
                           - condition: template
                             value_template: "{{ p_mode == 'color_temp' }}"
@@ -205,7 +208,7 @@ action:
                           - service: light.turn_on
                             data:
                               transition: "{{ t_smooth }}"
-                              kelvin: >-
+                              color_temp_kelvin: >-
                                 {% set speed = trigger.payload_json.action_rotation_percent_speed | float(0) %}
                                 {% set sign = 1 if speed > 0 else -1 %}
                                 {% set normalized_speed = (speed | abs) / 3.33 %}
