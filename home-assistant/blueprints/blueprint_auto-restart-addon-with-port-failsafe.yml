@@ -1,0 +1,100 @@
+blueprint:
+  name: "Auto-Restart Add-on with Port Failsafe"
+  description: |
+    Monitors a Home Assistant add-on (such as the OpenThread Border Router) for crashes. It prevents crash-loop backoffs by waiting for a secondary connectivity sensor (like a TCP port check) to become available before safely restarting the add-on. If the network doesn't return before the timeout, it executes fallback actions.
+
+    ### Prerequisites: Port Monitor Sensor
+    This automation requires a `command_line` binary sensor to verify if the remote radio or service is accepting connections. Add the following to your `configuration.yaml` and restart Home Assistant before configuring this blueprint:
+
+    ```yaml
+    command_line:
+      - binary_sensor:
+          name: "OTBR Radio Port Open"
+          # Replace YOUR_RADIO_IP and YOUR_PORT with your actual hardware details.
+          command: "nc -z -w 2 YOUR_RADIO_IP YOUR_PORT > /dev/null 2>&1 && echo ON || echo OFF"
+          payload_on: "ON"
+          payload_off: "OFF"
+          scan_interval: 10
+    ```
+
+    *Startup Protection:* This blueprint automatically ignores Home Assistant reboots by verifying the sensor did not originate from an `unknown` or `unavailable` state.
+  domain: automation
+  input:
+    addon_sensor:
+      name: Add-on Status Sensor
+      description: The binary sensor monitoring the add-on state (triggers when it goes 'off').
+      selector:
+        entity:
+          domain: binary_sensor
+    addon_slug:
+      name: Add-on Slug
+      description: "The internal slug of the add-on to restart (e.g., core_openthread_border_router)."
+      default: core_openthread_border_router
+      selector:
+        text: {}
+    debounce_time:
+      name: Crash Debounce Time
+      description: How long the add-on must be stopped before the automation triggers (prevents false positives on normal reboots).
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 120
+          unit_of_measurement: seconds
+    port_sensor:
+      name: Connectivity / Port Sensor
+      description: The binary sensor that verifies the remote radio or network port is actually available.
+      selector:
+        entity:
+          domain: binary_sensor
+    wait_timeout:
+      name: Failsafe Timeout
+      description: Maximum time to wait for the port to become available before giving up.
+      default:
+        minutes: 10
+      selector:
+        duration: {}
+    timeout_action:
+      name: Timeout Action(s)
+      description: The actions to execute if the timeout is reached (e.g., send a mobile notification).
+      default: []
+      selector:
+        action: {}
+
+mode: single
+
+trigger:
+  - platform: state
+    entity_id: !input addon_sensor
+    to: "off"
+    for:
+      seconds: !input debounce_time
+
+condition:
+  # Prevent triggering during HA startup or Supervisor reloads when entities initialize.
+  # If the prior state was unknown or unavailable, it means HA just booted up, not that the add-on actually crashed.
+  - condition: template
+    value_template: "{{ trigger.from_state is not none and trigger.from_state.state not in ['unknown', 'unavailable'] }}"
+
+action:
+  # Block the automation here until the port sensor reports that the socket is open
+  - wait_for_trigger:
+      - platform: state
+        entity_id: !input port_sensor
+        to: "on"
+    timeout: !input wait_timeout
+    continue_on_timeout: true
+
+  # Evaluate whether the wait finished due to the trigger or the timeout
+  - if:
+      - condition: template
+        value_template: "{{ not wait.completed }}"
+    then:
+      # Execute the user-defined fallback actions (e.g., notify)
+      - choose: []
+        default: !input timeout_action
+    else:
+      # The port is verified open, safely start the add-on
+      - action: hassio.addon_start
+        data:
+          addon: !input addon_slug
