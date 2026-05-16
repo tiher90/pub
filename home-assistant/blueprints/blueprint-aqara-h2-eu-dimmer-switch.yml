@@ -1,13 +1,12 @@
 blueprint:
-  name: Aqara H2 Dimmer Switch (KD-R01D) - Double-Click Mode Suite
+  name: Aqara H2 Dimmer Switch (KD-R01D) - Pure Toggle Suite
   description: |
     An advanced, MQTT-native blueprint for the Aqara H2 EU Dimmer (KD-R01D) via Zigbee2MQTT.
-    Uses Double-Click to switch the wheel between Brightness control and Color control.
+    Uses Double-Click to cleanly toggle the wheel function between Brightness and Color/CCT.
 
     Supported Core Actions:
       - Single Click: Toggles target light state.
-      - Double Click (First Time): Enters Color Mode (Helper ON).
-      - Double Click (Second Time): Exits Color Mode (Helper OFF) and resets light to Default White Kelvin.
+      - Double Click: Toggles Color Mode Helper (Flips back and forth).
       - Long Press (Hold): Drops light into an ultra-warm Nightlight Mode.
       - Rotation (Color Mode OFF): Adjusts brightness with kinetic acceleration scaling.
       - Rotation (Color Mode ON): Adjusts Color Temperature or sweeps the RGB Hue spectrum.
@@ -28,7 +27,7 @@ blueprint:
           multiple: false
     mode_helper:
       name: Mode Toggle Helper
-      description: Select the 'input_boolean' helper entity you created for this dimmer.
+      description: Select the 'input_boolean' helper entity created for this dimmer.
       selector:
         entity:
           filter:
@@ -82,15 +81,6 @@ blueprint:
           min: 5
           max: 50
           step: 1
-    colortemp_default:
-      name: Default Reset Color Temperature
-      description: Target Kelvin assigned when exiting Color Mode via Double-Click.
-      default: 5400
-      selector:
-        number:
-          min: 2000
-          max: 9000
-          unit_of_measurement: "K"
     nightlight_brightness:
       name: Nightlight Brightness Level
       description: Brightness percentage forced during a Long Press event.
@@ -128,7 +118,6 @@ variables:
   p_mode: !input pressed_behavior
   t_smooth: !input transition_smoothing
   curve: !input acceleration_factor
-  ct_default: !input colortemp_default
   nl_brightness: !input nightlight_brightness
   nl_kelvin: !input nightlight_kelvin
   helper_entity: !input mode_helper
@@ -154,34 +143,14 @@ action:
             target:
               entity_id: "{{ target_light_entity }}"
 
-      # 2. Double Click -> Toggle Mode / Reset Color
+      # 2. Double Click -> Purely Toggle Mode Helper State
       - conditions:
           - condition: template
             value_template: "{{ trigger.payload_json.action == 'double' }}"
         sequence:
-          - choose:
-              # If turning mode OFF: Reset light back to default crisp white
-              - conditions:
-                  - condition: template
-                    value_template: "{{ is_state(helper_entity, 'on') }}"
-                sequence:
-                  - service: input_boolean.turn_off
-                    target:
-                      entity_id: "{{ helper_entity }}"
-                  - service: light.turn_on
-                    data:
-                      color_temp_kelvin: "{{ ct_default }}"
-                      transition: "{{ t_smooth }}"
-                    target:
-                      entity_id: "{{ target_light_entity }}"
-              # If turning mode ON: Just toggle the helper
-              - conditions:
-                  - condition: template
-                    value_template: "{{ is_state(helper_entity, 'off') }}"
-                sequence:
-                  - service: input_boolean.turn_on
-                    target:
-                      entity_id: "{{ helper_entity }}"
+          - service: input_boolean.toggle
+            target:
+              entity_id: "{{ helper_entity }}"
 
       # 3. Long Press (Hold) -> Comfort Nightlight Preset
       - conditions:
@@ -267,15 +236,6 @@ action:
                                 [ {{ new_hue | round(2) }}, {{ current_sat }} ]
                             target:
                               entity_id: "{{ target_light_entity }}"
-                  
-                  # Asynchronous auto-reset countdown back to brightness mode
-                  - script:
-                      - stop: "Inactivity timeout"
-                        error: false
-                      - delay: "00:00:10"
-                      - service: input_boolean.turn_off
-                        target:
-                          entity_id: "{{ helper_entity }}"
 
 mode: parallel
 max: 20
