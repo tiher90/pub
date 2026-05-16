@@ -1,15 +1,16 @@
 blueprint:
-  name: Aqara H2 Dimmer Switch (KD-R01D) - Kinetic Control Suite (Fixed)
+  name: Aqara H2 Dimmer Switch (KD-R01D) - Double-Click Mode Suite
   description: |
     An advanced, MQTT-native blueprint for the Aqara H2 EU Dimmer (KD-R01D) via Zigbee2MQTT.
-    Features kinetic acceleration curves to match physical turning speed naturally.
+    Uses Double-Click to switch the wheel between Brightness control and Color control.
 
     Supported Core Actions:
       - Single Click: Toggles target light state.
-      - Double Click: Snaps light to a preferred default Color Temperature.
+      - Double Click (First Time): Enters Color Mode (Helper ON).
+      - Double Click (Second Time): Exits Color Mode (Helper OFF) and resets light to Default White Kelvin.
       - Long Press (Hold): Drops light into an ultra-warm Nightlight Mode.
-      - Rotation: Adjusts brightness with dynamic velocity-based acceleration scaling.
-      - Pressed Rotation: Updates either Color Temperature or sweeps the RGB Hue spectrum.
+      - Rotation (Color Mode OFF): Adjusts brightness with kinetic acceleration scaling.
+      - Rotation (Color Mode ON): Adjusts Color Temperature or sweeps the RGB Hue spectrum.
   domain: automation
   input:
     mqtt_topic:
@@ -25,9 +26,17 @@ blueprint:
           filter:
             - domain: light
           multiple: false
+    mode_helper:
+      name: Mode Toggle Helper
+      description: Select the 'input_boolean' helper entity you created for this dimmer.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+          multiple: false
     pressed_behavior:
-      name: Pressed Rotation Mode
-      description: Select what rotating the knob while pushing it down modifies.
+      name: Color Mode Behavior
+      description: Select what rotating the knob modifies when the Color Mode is active.
       default: color_temp
       selector:
         select:
@@ -39,9 +48,7 @@ blueprint:
           multiple: false
     acceleration_factor:
       name: Kinetic Acceleration Curve
-      description: >
-        Controls the velocity exponent. 1.0 is completely linear. 
-        Values between 1.2 and 1.5 create a natural kinetic feel (slow turns stay precise, fast flicks cause large changes).
+      description: Controls the velocity exponent. 1.0 is linear. 1.2 to 1.5 adds dynamic speed tracking.
       default: 1.3
       selector:
         number:
@@ -77,7 +84,7 @@ blueprint:
           step: 1
     colortemp_default:
       name: Default Reset Color Temperature
-      description: Target Kelvin assigned when double-clicking the dial.
+      description: Target Kelvin assigned when exiting Color Mode via Double-Click.
       default: 5400
       selector:
         number:
@@ -104,7 +111,7 @@ blueprint:
           unit_of_measurement: "K"
     transition_smoothing:
       name: Smooth Dimming Transition Time
-      description: Seconds used to blend rotary steps. Masks the discrete steps sent over Zigbee.
+      description: Seconds used to blend rotary steps.
       default: 0.1
       selector:
         number:
@@ -124,6 +131,7 @@ variables:
   ct_default: !input colortemp_default
   nl_brightness: !input nightlight_brightness
   nl_kelvin: !input nightlight_kelvin
+  helper_entity: !input mode_helper
 
 trigger:
   - platform: mqtt
@@ -146,19 +154,36 @@ action:
             target:
               entity_id: "{{ target_light_entity }}"
 
-      # 2. Double Click -> Reset to Default White State (Fixed Parameter)
+      # 2. Double Click -> Toggle Mode / Reset Color
       - conditions:
           - condition: template
             value_template: "{{ trigger.payload_json.action == 'double' }}"
         sequence:
-          - service: light.turn_on
-            data:
-              color_temp_kelvin: "{{ ct_default }}"
-              transition: "{{ t_smooth }}"
-            target:
-              entity_id: "{{ target_light_entity }}"
+          - choose:
+              # If turning mode OFF: Reset light back to default crisp white
+              - conditions:
+                  - condition: template
+                    value_template: "{{ is_state(helper_entity, 'on') }}"
+                sequence:
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ helper_entity }}"
+                  - service: light.turn_on
+                    data:
+                      color_temp_kelvin: "{{ ct_default }}"
+                      transition: "{{ t_smooth }}"
+                    target:
+                      entity_id: "{{ target_light_entity }}"
+              # If turning mode ON: Just toggle the helper
+              - conditions:
+                  - condition: template
+                    value_template: "{{ is_state(helper_entity, 'off') }}"
+                sequence:
+                  - service: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ helper_entity }}"
 
-      # 3. Long Press (Hold) -> Comfort Nightlight Preset (Fixed Parameter)
+      # 3. Long Press (Hold) -> Comfort Nightlight Preset
       - conditions:
           - condition: template
             value_template: "{{ trigger.payload_json.action == 'hold' }}"
@@ -177,10 +202,10 @@ action:
             value_template: "{{ trigger.payload_json.action == 'rotation' }}"
         sequence:
           - choose:
-              # Case A: Dial rotated normally -> Smooth Brightness Control
+              # Case A: Helper is OFF -> Regular Brightness Control
               - conditions:
                   - condition: template
-                    value_template: "{{ trigger.payload_json.action_rotation_button_state == 'released' }}"
+                    value_template: "{{ is_state(helper_entity, 'off') }}"
                 sequence:
                   - service: light.turn_on
                     data:
@@ -194,13 +219,13 @@ action:
                     target:
                       entity_id: "{{ target_light_entity }}"
 
-              # Case B: Dial pushed down + turned -> Contextual Mode Execution
+              # Case B: Helper is ON -> Color Mode Active
               - conditions:
                   - condition: template
-                    value_template: "{{ trigger.payload_json.action_rotation_button_state == 'pressed' }}"
+                    value_template: "{{ is_state(helper_entity, 'on') }}"
                 sequence:
                   - choose:
-                      # Branch B1: Adjusting CCT Kelvin Values (Fixed Parameter)
+                      # Branch B1: Adjusting CCT Kelvin Values
                       - conditions:
                           - condition: template
                             value_template: "{{ p_mode == 'color_temp' }}"
@@ -242,6 +267,15 @@ action:
                                 [ {{ new_hue | round(2) }}, {{ current_sat }} ]
                             target:
                               entity_id: "{{ target_light_entity }}"
+                  
+                  # Asynchronous auto-reset countdown back to brightness mode
+                  - script:
+                      - stop: "Inactivity timeout"
+                        error: false
+                      - delay: "00:00:10"
+                      - service: input_boolean.turn_off
+                        target:
+                          entity_id: "{{ helper_entity }}"
 
 mode: parallel
 max: 20
