@@ -1,20 +1,29 @@
 blueprint:
-  name: Aqara H2 Dimmer Switch (KD-R01D) - Pure Toggle Suite
+  name: Aqara H2 EU Dimmer Switch (KD-R01D, Rotary Dial/Knob) - Core - Advanced Light Control (Zigbee2MQTT/Z2M)
   description: |
-    An advanced, MQTT-native blueprint for the Aqara H2 EU Dimmer (KD-R01D) via Zigbee2MQTT.
-    Uses Double-Click to cleanly toggle the wheel function between Brightness and Color/CCT.
+    Blueprint for controlling lights with the Aqara H2 EU Dimmer Switch (KD-R01D, Rotary Dial/Knob) via Zigbee2MQTT.
+    The blueprint is designed for MQTT-native control, leveraging the action payloads from the H2 switch to provide a versatile lighting experience.
 
-    Supported Core Actions:
+    Supported Actions:
       - Single Click: Toggles target light state.
-      - Double Click: Toggles Color Mode Helper (Flips back and forth).
-      - Long Press (Hold): Drops light into an ultra-warm Nightlight Mode.
+      - Double Click: Toggles the color control mode (roating the knob adjusts the brightness vs. color temperature). NEEDS HELPER ENTITY!
+      - Long Press (Hold): Sets the light into an ultra-warm Nightlight Mode.
       - Rotation (Color Mode OFF): Adjusts brightness with kinetic acceleration scaling.
       - Rotation (Color Mode ON): Adjusts Color Temperature or sweeps the RGB Hue spectrum.
+
+    Configuration Instructions:
+      1. Set up your Aqara H2 Dimmer Switch in Zigbee2MQTT and note the MQTT topic it publishes to (e.g. zigbee2mqtt/Kitchen Dimmer Switch).
+      2. Create an 'input_boolean' helper in Home Assistant to serve as the toggle for Color Mode. Name it descriptively (e.g., "Kitchen Dimmer Color Mode").
+      3. Use this blueprint to create an automation, filling in the required fields:
+         - MQTT Topic: The base topic your H2 switch uses in Zigbee2MQTT.
+         - Target Light Entity: The smart light you want to control.
+         - Mode Toggle Helper: The entity name of the 'input_boolean' helper you created for toggling Color Mode.
+         - Adjust the sensitivity and behavior settings as desired.
   domain: automation
   input:
     mqtt_topic:
       name: MQTT Topic
-      description: The base topic of your H2 switch (e.g., z2m/Küche Lichtschalter Aqara Dimmer).
+      description: The base topic of your H2 switch (e.g. zigbee2mqtt/Kitchen Dimmer Switch).
       selector:
         text:
     target_light:
@@ -97,7 +106,7 @@ blueprint:
       selector:
         number:
           min: 1500
-          max: 3000
+          max: 4500
           unit_of_measurement: "K"
     transition_smoothing:
       name: Smooth Dimming Transition Time
@@ -143,7 +152,7 @@ action:
             target:
               entity_id: "{{ target_light_entity }}"
 
-      # 2. Double Click -> Purely Toggle Mode Helper State
+      # 2. Double Click -> Toggle Mode Helper State (Color COntrol Mode On/Off)
       - conditions:
           - condition: template
             value_template: "{{ trigger.payload_json.action == 'double' }}"
