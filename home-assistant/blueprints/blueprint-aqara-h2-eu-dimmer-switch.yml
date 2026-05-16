@@ -1,0 +1,244 @@
+blueprint:
+  name: Aqara H2 Dimmer Switch (KD-R01D) - Kinetic Control Suite
+  description: |
+    An advanced, MQTT-native blueprint for the Aqara H2 EU Dimmer (KD-R01D) via Zigbee2MQTT.
+    Features kinetic acceleration curves to match physical turning speed naturally.
+
+    Supported Core Actions:
+      - Single Click: Toggles target light state.
+      - Double Click: Snaps light to a preferred default Color Temperature.
+      - Long Press (Hold): Drops light into an ultra-warm Nightlight Mode.
+      - Rotation: Adjusts brightness with dynamic velocity-based acceleration scaling.
+      - Pressed Rotation: Updates either Color Temperature or sweeps the RGB Hue spectrum.
+  domain: automation
+  input:
+    mqtt_topic:
+      name: MQTT Topic
+      description: The base topic of your H2 switch (e.g., z2m/Küche Lichtschalter Aqara Dimmer).
+      selector:
+        text:
+    target_light:
+      name: Target Light Entity
+      description: The smart light entity to govern.
+      selector:
+        entity:
+          filter:
+            - domain: light
+          multiple: false
+    pressed_behavior:
+      name: Pressed Rotation Mode
+      description: Select what rotating the knob while pushing it down modifies.
+      default: color_temp
+      selector:
+        select:
+          options:
+            - label: Color Temperature (Kelvin)
+              value: color_temp
+            - label: Color Hue Spectrum (RGB Rainbow)
+              value: color_hue
+          multiple: false
+    acceleration_factor:
+      name: Kinetic Acceleration Curve
+      description: >
+        Controls the velocity exponent. 1.0 is completely linear. 
+        Values between 1.2 and 1.5 create a natural kinetic feel (slow turns stay precise, fast flicks cause large changes).
+      default: 1.3
+      selector:
+        number:
+          min: 1.0
+          max: 2.0
+          step: 0.05
+    brightness_step_scale:
+      name: Brightness Sensitivity
+      description: Base multiplier for brightness adjustments.
+      default: 2.0
+      selector:
+        number:
+          min: 0.5
+          max: 5.0
+          step: 0.1
+    colortemp_step_scale:
+      name: Color Temperature Sensitivity
+      description: Base Kelvin adjustment step size applied when rotating in CCT mode.
+      default: 80
+      selector:
+        number:
+          min: 10
+          max: 200
+          step: 10
+    hue_step_scale:
+      name: RGB Hue Sensitivity
+      description: Base degrees of shift across the 0-360° color wheel per step.
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 50
+          step: 1
+    colortemp_default:
+      name: Default Reset Color Temperature
+      description: Target Kelvin assigned when double-clicking the dial.
+      default: 5400
+      selector:
+        number:
+          min: 2000
+          max: 9000
+          unit_of_measurement: "K"
+    nightlight_brightness:
+      name: Nightlight Brightness Level
+      description: Brightness percentage forced during a Long Press event.
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 15
+          unit_of_measurement: "%"
+    nightlight_kelvin:
+      name: Nightlight Color Temperature
+      description: Kelvin warmth target forced during a Long Press event.
+      default: 2200
+      selector:
+        number:
+          min: 1500
+          max: 3000
+          unit_of_measurement: "K"
+    transition_smoothing:
+      name: Smooth Dimming Transition Time
+      description: Seconds used to blend rotary steps. Masks the discrete steps sent over Zigbee.
+      default: 0.1
+      selector:
+        number:
+          min: 0.0
+          max: 0.5
+          step: 0.05
+          unit_of_measurement: "s"
+
+variables:
+  target_light_entity: !input target_light
+  b_scale: !input brightness_step_scale
+  ct_scale: !input colortemp_step_scale
+  h_scale: !input hue_step_scale
+  p_mode: !input pressed_behavior
+  t_smooth: !input transition_smoothing
+  curve: !input acceleration_factor
+
+trigger:
+  - platform: mqtt
+    topic: !input mqtt_topic
+
+condition:
+  - condition: template
+    value_template: "{{ trigger.payload_json.action is defined and trigger.payload_json.action not in [None, '', 'stop_rotating', 'release'] }}"
+
+action:
+  - choose:
+      # 1. Single Click -> Toggle State
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.payload_json.action == 'single' }}"
+        sequence:
+          - service: light.toggle
+            data:
+              transition: "{{ t_smooth }}"
+            target:
+              entity_id: "{{ target_light_entity }}"
+
+      # 2. Double Click -> Reset to Default White State
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.payload_json.action == 'double' }}"
+        sequence:
+          - service: light.turn_on
+            data:
+              kelvin: !input colortemp_default
+              transition: "{{ t_smooth }}"
+            target:
+              entity_id: "{{ target_light_entity }}"
+
+      # 3. Long Press (Hold) -> Comfort Nightlight Preset
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.payload_json.action == 'hold' }}"
+        sequence:
+          - service: light.turn_on
+            data:
+              brightness_pct: !input nightlight_brightness
+              kelvin: !input nightlight_kelvin
+              transition: 0.4
+            target:
+              entity_id: "{{ target_light_entity }}"
+
+      # 4. Active Knob Rotation
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.payload_json.action == 'rotation' }}"
+        sequence:
+          - choose:
+              # Case A: Dial rotated normally -> Smooth Brightness Control (With Kinetic Curve)
+              - conditions:
+                  - condition: template
+                    value_template: "{{ trigger.payload_json.action_rotation_button_state == 'released' }}"
+                sequence:
+                  - service: light.turn_on
+                    data:
+                      transition: "{{ t_smooth }}"
+                      brightness_step_pct: >-
+                        {% set speed = trigger.payload_json.action_rotation_percent_speed | float(0) %}
+                        {% set sign = 1 if speed > 0 else -1 %}
+                        {% set normalized_speed = (speed | abs) / 3.33 %}
+                        {% set kinetic_multiplier = normalized_speed ** (curve | float) %}
+                        {{ (sign * kinetic_multiplier * (b_scale | float)) | round(2) }}
+                    target:
+                      entity_id: "{{ target_light_entity }}"
+
+              # Case B: Dial pushed down + turned -> Contextual Mode Execution
+              - conditions:
+                  - condition: template
+                    value_template: "{{ trigger.payload_json.action_rotation_button_state == 'pressed' }}"
+                sequence:
+                  - choose:
+                      # Branch B1: Adjusting CCT Kelvin Values
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ p_mode == 'color_temp' }}"
+                        sequence:
+                          - service: light.turn_on
+                            data:
+                              transition: "{{ t_smooth }}"
+                              kelvin: >-
+                                {% set speed = trigger.payload_json.action_rotation_percent_speed | float(0) %}
+                                {% set sign = 1 if speed > 0 else -1 %}
+                                {% set normalized_speed = (speed | abs) / 3.33 %}
+                                {% set kinetic_multiplier = normalized_speed ** (curve | float) %}
+                                {% set current_k = state_attr(target_light_entity, 'color_temp_kelvin') | float(4000) %}
+                                {% set min_k = state_attr(target_light_entity, 'min_color_temp_kelvin') | float(2700) %}
+                                {% set max_k = state_attr(target_light_entity, 'max_color_temp_kelvin') | float(6500) %}
+                                {% set step = sign * kinetic_multiplier * (ct_scale | float) %}
+                                {{ min(max_k, max(min_k, (current_k + step) | int)) }}
+                            target:
+                              entity_id: "{{ target_light_entity }}"
+
+                      # Branch B2: Rotating through RGB Spectrum Wheels
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ p_mode == 'color_hue' }}"
+                        sequence:
+                          - service: light.turn_on
+                            data:
+                              transition: "{{ t_smooth }}"
+                              hs_color: >-
+                                {% set speed = trigger.payload_json.action_rotation_percent_speed | float(0) %}
+                                {% set sign = 1 if speed > 0 else -1 %}
+                                {% set normalized_speed = (speed | abs) / 3.33 %}
+                                {% set kinetic_multiplier = normalized_speed ** (curve | float) %}
+                                {% set current_hs = state_attr(target_light_entity, 'hs_color') %}
+                                {% set current_hue = current_hs[0] | float(0) if current_hs else 0 %}
+                                {% set current_sat = current_hs[1] | float(100) if current_hs else 100 %}
+                                {% set step = sign * kinetic_multiplier * (h_scale | float) %}
+                                {% set new_hue = (current_hue + step) % 360 %}
+                                [ {{ new_hue | round(2) }}, {{ current_sat }} ]
+                            target:
+                              entity_id: "{{ target_light_entity }}"
+
+mode: parallel
+max: 20
