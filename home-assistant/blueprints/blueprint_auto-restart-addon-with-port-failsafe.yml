@@ -16,8 +16,6 @@ blueprint:
           payload_off: "OFF"
           scan_interval: 10
     ```
-
-    *Startup Protection:* This blueprint automatically ignores Home Assistant reboots by verifying the sensor did not originate from an `unknown` or `unavailable` state.
   domain: automation
   input:
     addon_sensor:
@@ -35,7 +33,7 @@ blueprint:
     debounce_time:
       name: Crash Debounce Time
       description: How long the add-on must be stopped before the automation triggers (prevents false positives on normal reboots).
-      default: 15
+      default: 30
       selector:
         number:
           min: 0
@@ -69,12 +67,6 @@ trigger:
     to: "off"
     for:
       seconds: !input debounce_time
-
-condition:
-  # Prevent triggering during HA startup or Supervisor reloads when entities initialize.
-  # If the prior state was unknown or unavailable, it means HA just booted up, not that the add-on actually crashed.
-  - condition: template
-    value_template: "{{ trigger.from_state is not none and trigger.from_state.state not in ['unknown', 'unavailable'] }}"
 
 action:
   # Block the automation here until the port sensor reports that the socket is open
