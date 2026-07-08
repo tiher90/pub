@@ -1,0 +1,281 @@
+blueprint:
+  name: Aqara H2 EU Single Rocker Switch (WS-K07E) - Core - Advanced Light Control (Zigbee2MQTT/Z2M)
+  description: |
+    Blueprint for controlling lights with the Aqara H2 EU Single Rocker Switch (WS-K07E) via Zigbee2MQTT.
+    The blueprint is MQTT-native and drives an external target light from the switch's action events, so the
+    switch behaves as a decoupled remote rather than directly toggling its own internal relay.
+
+    Supported Actions:
+      - Single Click UP: Turns the target light ON (restores its previous brightness/color).
+      - Single Click DOWN: Turns the target light OFF.
+      - Double Click DOWN: Sets an ultra-warm Nightlight preset.
+      - Double Click UP: Jumps to a configurable bright preset (default 100%).
+      - Hold DOWN + Release DOWN: Smoothly ramps brightness DOWN while held; releasing stops the ramp.
+      - Hold UP + Release UP: Smoothly ramps brightness UP while held; releasing stops the ramp.
+
+    Note on button capabilities:
+      On the physical single-rocker WS-K07E, multi-click/hold detection is only active on the DOWN endpoint
+      (governed by the 'Multi click' setting), while the UP endpoint typically emits only 'single_up'. This
+      blueprint handles all eight action strings regardless, so the UP-paddle gestures (double_up, hold_up,
+      release_up) work automatically if you ever enable multi-click on the UP endpoint or reuse the blueprint
+      on a dual-rocker H2. On a default single-rocker unit they simply never fire - no harm done.
+
+    Automatic switch configuration (optional, recommended):
+      For the blueprint to work as intended the switch should run its UP endpoint decoupled (so button presses
+      do not toggle the built-in relay) and have multi-click enabled on the DOWN endpoint. When 'Enforce Switch
+      Configuration' is enabled the blueprint publishes the required settings once on Home Assistant startup:
+        - operation_mode_up: decoupled
+        - multi_click_down: true
+      This happens off the hot path (startup only), so button presses are never delayed and there is zero extra
+      MQTT traffic during normal operation. If you manage the switch configuration yourself, disable this option.
+
+    Why 'mode: restart':
+      Hold-to-dim needs the release event to cancel the running ramp loop. Because the trigger listens on the
+      '/action' subtopic (which only ever publishes on a real button event), a restart is only ever caused by a
+      genuine new action - so releasing the rocker cleanly stops the ramp. The ramp loop is also self-bounded
+      (it stops at the brightness floor/ceiling and after a hard iteration cap) as a failsafe against a lost
+      release message.
+
+    Configuration Instructions:
+      1. Set up your Aqara H2 Single Rocker Switch in Zigbee2MQTT and note its MQTT ACTION topic
+         (e.g. zigbee2mqtt/Kitchen Switch/action - it ends in '/action').
+      2. Use this blueprint to create an automation, filling in the required fields:
+         - MQTT Action Topic: The '/action' topic your WS-K07E publishes to in Zigbee2MQTT.
+         - Target Light Entity: The smart light you want to control.
+         - Adjust dimming, preset and configuration-enforcement options as desired.
+  domain: automation
+  input:
+    mqtt_action_topic:
+      name: MQTT Action Topic
+      description: >-
+        The '/action' topic of your WS-K07E (e.g. zigbee2mqtt/Kitchen Switch/action). It must end in '/action';
+        the switch's '/set' topic is derived from it for optional configuration enforcement.
+      selector:
+        text:
+    target_light:
+      name: Target Light Entity
+      description: The smart light entity to govern.
+      selector:
+        entity:
+          filter:
+            - domain: light
+          multiple: false
+    enforce_switch_config:
+      name: Enforce Switch Configuration
+      description: >-
+        When enabled, the blueprint pushes the required Z2M settings (operation_mode_up = decoupled,
+        multi_click_down = true) once on Home Assistant startup. Disable if you manage these yourself.
+      default: true
+      selector:
+        boolean:
+    bright_preset:
+      name: Bright Preset (Double Click UP)
+      description: Brightness percentage applied on a Double Click UP event.
+      default: 100
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
+    nightlight_brightness:
+      name: Nightlight Brightness Level
+      description: Brightness percentage forced on a Double Click DOWN event.
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 15
+          unit_of_measurement: "%"
+    nightlight_kelvin:
+      name: Nightlight Color Temperature
+      description: Kelvin warmth target forced on a Double Click DOWN event.
+      default: 2200
+      selector:
+        number:
+          min: 1500
+          max: 4500
+          unit_of_measurement: "K"
+    dim_step_pct:
+      name: Dimming Step Size
+      description: Brightness percentage changed per step while holding the rocker.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 25
+          step: 1
+          unit_of_measurement: "%"
+    dim_step_delay:
+      name: Dimming Step Interval
+      description: Seconds between dimming steps while held (also used as the per-step transition time).
+      default: 0.3
+      selector:
+        number:
+          min: 0.1
+          max: 1.0
+          step: 0.05
+          unit_of_measurement: "s"
+    dim_floor_pct:
+      name: Dimming Floor
+      description: Lowest brightness percentage the hold-to-dim ramp will descend to before stopping.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+          unit_of_measurement: "%"
+    transition_smoothing:
+      name: Smooth Transition Time
+      description: Seconds used to blend single/double click actions.
+      default: 0.1
+      selector:
+        number:
+          min: 0.0
+          max: 0.5
+          step: 0.05
+          unit_of_measurement: "s"
+
+variables:
+  target_light_entity: !input target_light
+  enforce_config: !input enforce_switch_config
+  bright_preset: !input bright_preset
+  nl_brightness: !input nightlight_brightness
+  nl_kelvin: !input nightlight_kelvin
+  dim_step: !input dim_step_pct
+  dim_delay: !input dim_step_delay
+  dim_floor: !input dim_floor_pct
+  t_smooth: !input transition_smoothing
+  action_topic: !input mqtt_action_topic
+  set_topic: "{{ (action_topic | regex_replace('/action$', '')) ~ '/set' }}"
+
+trigger:
+  - platform: mqtt
+    topic: !input mqtt_action_topic
+    id: action
+  - platform: homeassistant
+    event: start
+    id: startup
+
+action:
+  - choose:
+      # 0. Startup -> Enforce required switch configuration (off the hot path)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'startup' and enforce_config }}"
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: "{{ set_topic }}"
+              payload: '{"operation_mode_up": "decoupled"}'
+          - service: mqtt.publish
+            data:
+              topic: "{{ set_topic }}"
+              payload: '{"multi_click_down": true}'
+
+      # 1. Button action received on the /action subtopic
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'action' }}"
+        sequence:
+          - variables:
+              act: "{{ trigger.payload | trim }}"
+          - choose:
+              # Single Click UP -> Turn ON (restore previous state)
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act == 'single_up' }}"
+                sequence:
+                  - service: light.turn_on
+                    data:
+                      transition: "{{ t_smooth }}"
+                    target:
+                      entity_id: "{{ target_light_entity }}"
+
+              # Single Click DOWN -> Turn OFF
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act == 'single_down' }}"
+                sequence:
+                  - service: light.turn_off
+                    data:
+                      transition: "{{ t_smooth }}"
+                    target:
+                      entity_id: "{{ target_light_entity }}"
+
+              # Double Click UP -> Bright preset
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act == 'double_up' }}"
+                sequence:
+                  - service: light.turn_on
+                    data:
+                      brightness_pct: "{{ bright_preset }}"
+                      transition: "{{ t_smooth }}"
+                    target:
+                      entity_id: "{{ target_light_entity }}"
+
+              # Double Click DOWN -> Nightlight preset
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act == 'double_down' }}"
+                sequence:
+                  - service: light.turn_on
+                    data:
+                      brightness_pct: "{{ nl_brightness }}"
+                      color_temp_kelvin: "{{ nl_kelvin }}"
+                      transition: 0.4
+                    target:
+                      entity_id: "{{ target_light_entity }}"
+
+              # Hold DOWN -> Ramp brightness DOWN until released (or floor reached)
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act == 'hold_down' }}"
+                sequence:
+                  - repeat:
+                      while:
+                        - condition: template
+                          value_template: >-
+                            {% set b = state_attr(target_light_entity, 'brightness') | int(0) %}
+                            {% set floor_b = (dim_floor | float) / 100 * 255 %}
+                            {{ b > floor_b and repeat.index < 100 }}
+                      sequence:
+                        - service: light.turn_on
+                          data:
+                            transition: "{{ dim_delay }}"
+                            brightness_step_pct: "{{ -(dim_step | float) }}"
+                          target:
+                            entity_id: "{{ target_light_entity }}"
+                        - delay: "{{ dim_delay }}"
+
+              # Hold UP -> Ramp brightness UP until released (or ceiling reached)
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act == 'hold_up' }}"
+                sequence:
+                  - repeat:
+                      while:
+                        - condition: template
+                          value_template: >-
+                            {% set b = state_attr(target_light_entity, 'brightness') | int(0) %}
+                            {{ b < 254 and repeat.index < 100 }}
+                      sequence:
+                        - service: light.turn_on
+                          data:
+                            transition: "{{ dim_delay }}"
+                            brightness_step_pct: "{{ (dim_step | float) }}"
+                          target:
+                            entity_id: "{{ target_light_entity }}"
+                        - delay: "{{ dim_delay }}"
+
+              # Release UP/DOWN -> No-op; the restart already cancelled any running ramp
+              - conditions:
+                  - condition: template
+                    value_template: "{{ act in ['release_up', 'release_down'] }}"
+                sequence:
+                  - stop: "Rocker released - ramp stopped"
+
+mode: restart
+max_exceeded: silent
